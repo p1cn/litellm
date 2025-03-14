@@ -1126,3 +1126,104 @@ async def ui_view_users(
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error searching users: {str(e)}")
+
+
+@router.get(
+    "/user/get_or_create",
+    tags=["Internal User management"],
+)
+async def get_or_create_user(
+    request: Request,
+):
+    """
+    Get user information by webauth-email header. If user doesn't exist, create a new user.
+
+    Parameters:
+        request (Request): The incoming request with webauth-email header
+    
+    Returns:
+        UserInfoResponse: User information including user details and associated keys
+    """
+    from litellm.proxy.proxy_server import prisma_client
+
+    try:
+        # Get email from header
+        email = request.headers.get("webauth-email")
+        if not email:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": "webauth-email header is required"}
+            )
+
+        if prisma_client is None:
+            raise Exception(
+                "Database not connected. Connect a database to your proxy - https://docs.litellm.ai/docs/simple_proxy#managing-auth---virtual-keys"
+            )
+
+        # Try to find existing user
+        existing_user = await prisma_client.get_data(
+            key_val={"user_email": email},
+            table_name="user",
+            query_type="find_first"
+        )
+
+        if existing_user:
+            # User exists, return user info
+            user_id = existing_user.user_id
+        else:
+            # Create new user
+            user_id = str(uuid.uuid4())
+            await prisma_client.insert_data(
+                data={
+                    "user_id": user_id,
+                    "user_email": email,
+                    "user_role": "internal_user",
+                },
+                table_name="user"
+            )
+
+        # Get complete user info
+        user_info = await prisma_client.get_data(user_id=user_id)
+        
+        # Get user's keys
+        keys = await prisma_client.get_data(
+            user_id=user_id,
+            table_name="key",
+            query_type="find_all",
+        )
+
+        if user_info is None and keys is not None:
+            ## make sure we still return a total spend ##
+            spend = 0
+            for k in keys:
+                spend += getattr(k, "spend", 0)
+            user_info = {"spend": spend}
+
+        ## REMOVE HASHED TOKEN INFO before returning ##
+        returned_keys = []
+        if keys:
+            for key in keys:
+                try:
+                    _key = key.model_dump()
+                except:
+                    # if using pydantic v1
+                    _key = key.dict()
+                returned_keys.append(_key)
+
+        _user_info = user_info.model_dump() if isinstance(user_info, BaseModel) else user_info
+        
+        return UserInfoResponse(
+            user_id=user_id,
+            user_info=_user_info,
+            keys=returned_keys,
+            teams=[]
+        )
+
+    except Exception as e:
+        verbose_proxy_logger.error(f"Error in get_or_create_user: {str(e)}")
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(
+            status_code=500,
+            detail={"error": f"Failed to get or create user: {str(e)}"}
+        )

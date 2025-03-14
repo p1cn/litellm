@@ -31,10 +31,12 @@ import GuardrailsPanel from "@/components/guardrails";
 import TransformRequestPanel from "@/components/transform_request";
 import { fetchUserModels } from "@/components/create_key_button";
 import { fetchTeams } from "@/components/common_components/fetch_teams";
+import { generateToken } from "@/utils/tokenUtils";
+import { UserInfo } from "@/components/view_users/types";
+import { UserInfoResponse } from "@/types";
+
 function getCookie(name: string) {
-  const cookieValue = document.cookie
-    .split("; ")
-    .find((row) => row.startsWith(name + "="));
+  const cookieValue = document.cookie.split("; ").find((row) => row.startsWith(name + "="));
   return cookieValue ? cookieValue.split("=")[1] : null;
 }
 
@@ -75,11 +77,55 @@ interface ProxySettings {
 
 const queryClient = new QueryClient();
 
+// 修改网络请求函数
+async function getUserInfo(baseUrl?: string): Promise<UserInfoResponse | null> {
+  try {
+    const url = baseUrl ? `${baseUrl}/user/get_or_create` : "/user/get_or_create";
+    console.log("Calling getUserInfo with URL:", url);
+
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        "Content-Type": "application/json",
+        "webauth-email": "test@test.com", // 添加必要的 header
+      },
+    });
+
+    console.log("Response status:", response.status);
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error("Error response:", errorText);
+      return null;
+    }
+
+    const responseText = await response.text();
+    console.log("Response text:", responseText);
+
+    try {
+      const data = JSON.parse(responseText);
+      console.log("Parsed response data:", data);
+
+      // 验证响应格式
+      if (!data.user_info) {
+        console.error("Missing user_info in response");
+        return null;
+      }
+
+      return data;
+    } catch (parseError) {
+      console.error("Error parsing response:", parseError);
+      return null;
+    }
+  } catch (error) {
+    console.error("Error in getUserInfo:", error);
+    return null;
+  }
+}
+
 export default function CreateKeyPage() {
   const [userRole, setUserRole] = useState("");
   const [premiumUser, setPremiumUser] = useState(false);
-  const [disabledPersonalKeyCreation, setDisabledPersonalKeyCreation] =
-    useState(false);
+  const [disabledPersonalKeyCreation, setDisabledPersonalKeyCreation] = useState(false);
   const [userEmail, setUserEmail] = useState<null | string>(null);
   const [teams, setTeams] = useState<Team[] | null>(null);
   const [keys, setKeys] = useState<null | any[]>(null);
@@ -120,10 +166,35 @@ export default function CreateKeyPage() {
   useEffect(() => {
     const token = getCookie("token");
     setToken(token);
-  }, []);
 
-  useEffect(() => {
     if (!token) {
+      // 如果在开发环境中，使用默认的 localhost:4000
+      const baseUrl = process.env.NODE_ENV === "development" ? "http://localhost:4000" : proxySettings.PROXY_BASE_URL;
+
+      getUserInfo(baseUrl).then((response) => {
+        if (response && response.user_info) {
+          console.log("Setting user info from response:", response);
+          // 设置用户信息
+          const formattedUserRole = formatUserRole(response.user_info.user_role);
+          setUserRole(formattedUserRole);
+          setUserEmail(response.user_info.user_email);
+
+          // 创建新的 token
+          const newToken = generateToken(response);
+          document.cookie = `token=${newToken}`;
+          setToken(newToken);
+
+          // 设置其他必要的状态
+          setAccessToken(response.keys?.[0]?.token || null);
+          setDisabledPersonalKeyCreation(false);
+          setPremiumUser(false);
+        } else {
+          console.error("Invalid response format or missing user info:", response);
+          // 如果获取用户信息失败，重定向到 SSO 登录
+          const url = baseUrl ? `${baseUrl}/sso/key/generate` : `/sso/key/generate`;
+          window.location.href = url;
+        }
+      });
       return;
     }
 
@@ -136,9 +207,7 @@ export default function CreateKeyPage() {
       // set accessToken
       setAccessToken(decoded.key);
 
-      setDisabledPersonalKeyCreation(
-        decoded.disabled_non_admin_personal_key_creation,
-      );
+      setDisabledPersonalKeyCreation(decoded.disabled_non_admin_personal_key_creation);
 
       // check if userRole is defined
       if (decoded.user_role) {
@@ -159,9 +228,7 @@ export default function CreateKeyPage() {
       }
 
       if (decoded.login_method) {
-        setShowSSOBanner(
-          decoded.login_method == "username_password" ? true : false,
-        );
+        setShowSSOBanner(decoded.login_method == "username_password" ? true : false);
       } else {
         console.log(`User Email is not set ${decoded}`);
       }
@@ -174,8 +241,8 @@ export default function CreateKeyPage() {
         setGlobalLitellmHeaderName(decoded.auth_header_name);
       }
     }
-  }, [token]);
-  
+  }, [token, proxySettings]);
+
   useEffect(() => {
     if (accessToken && userID && userRole) {
       fetchUserModels(userID, userRole, accessToken, setUserModels);
@@ -187,7 +254,6 @@ export default function CreateKeyPage() {
       fetchOrganizations(accessToken, setOrganizations);
     }
   }, [accessToken, userID, userRole]);
-
 
   return (
     <Suspense fallback={<div>Loading...</div>}>
@@ -219,11 +285,7 @@ export default function CreateKeyPage() {
             />
             <div className="flex flex-1 overflow-auto">
               <div className="mt-8">
-                <Sidebar
-                  setPage={updatePage}
-                  userRole={userRole}
-                  defaultSelectedKey={page}
-                />
+                <Sidebar setPage={updatePage} userRole={userRole} defaultSelectedKey={page} />
               </div>
 
               {page == "api-keys" ? (
@@ -300,12 +362,7 @@ export default function CreateKeyPage() {
               ) : page == "api_ref" ? (
                 <APIRef proxySettings={proxySettings} />
               ) : page == "settings" ? (
-                <Settings
-                  userID={userID}
-                  userRole={userRole}
-                  accessToken={accessToken}
-                  premiumUser={premiumUser}
-                />
+                <Settings userID={userID} userRole={userRole} accessToken={accessToken} premiumUser={premiumUser} />
               ) : page == "budgets" ? (
                 <BudgetPanel accessToken={accessToken} />
               ) : page == "guardrails" ? (
@@ -313,18 +370,9 @@ export default function CreateKeyPage() {
               ) : page == "transform-request" ? (
                 <TransformRequestPanel accessToken={accessToken} />
               ) : page == "general-settings" ? (
-                <GeneralSettings
-                  userID={userID}
-                  userRole={userRole}
-                  accessToken={accessToken}
-                  modelData={modelData}
-                />
+                <GeneralSettings userID={userID} userRole={userRole} accessToken={accessToken} modelData={modelData} />
               ) : page == "model-hub" ? (
-                <ModelHub
-                  accessToken={accessToken}
-                  publicPage={false}
-                  premiumUser={premiumUser}
-                />
+                <ModelHub accessToken={accessToken} publicPage={false} premiumUser={premiumUser} />
               ) : page == "caching" ? (
                 <CacheDashboard
                   userID={userID}
@@ -341,12 +389,7 @@ export default function CreateKeyPage() {
                   modelData={modelData}
                 />
               ) : page == "logs" ? (
-                <SpendLogsTable
-                  userID={userID}
-                  userRole={userRole}
-                  token={token}
-                  accessToken={accessToken}
-                />
+                <SpendLogsTable userID={userID} userRole={userRole} token={token} accessToken={accessToken} />
               ) : (
                 <Usage
                   userID={userID}
